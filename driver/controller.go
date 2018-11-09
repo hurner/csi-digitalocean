@@ -575,22 +575,41 @@ func (d *Driver) ControllerGetCapabilities(ctx context.Context, req *csi.Control
 // CreateSnapshot will be called by the CO to create a new snapshot from a
 // source volume on behalf of a user.
 func (d *Driver) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequest) (*csi.CreateSnapshotResponse, error) {
-	d.log.WithFields(logrus.Fields{
-		"req":    req,
-		"method": "create_snapshot",
-	}).Warn("create snapshot is not implemented")
+	if req.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "CreateSnapshot Name must be provided")
+	}
 
-	// get volume first, if it's created do no thing
-	_, _, err := d.doClient.Storage.CreateSnapshot(ctx, &godo.SnapshotCreateRequest{
-		VolumeID:    "",
-		Name:        "",
+	if req.GetSourceVolumeId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "CreateSnapshot Source Volume ID must be provided")
+	}
+
+	d.log.WithFields(logrus.Fields{
+		"req_name":             req.GetName(),
+		"req_source_volume_id": req.GetSourceVolumeId(),
+		"req_parameters":       req.GetParameters(),
+		"method":               "create_snapshot",
+	}).Warn("create snapshot is called")
+
+	// get snapshot first, if it's created do no thing
+	snapshot, resp, err := d.doClient.Storage.GetSnapshot(ctx, req.GetSourceVolumeId())
+	if err == nil {
+		return toCreateSnapshotResponse(ctx, snapshot)
+	}
+
+	if err != nil && resp != nil && resp.StatusCode != http.StatusNotFound {
+		return nil, status.Errorf(codes.Internal, "couldn't fetch existing snapshot: %s", err.Error())
+	}
+
+	snap, _, err := d.doClient.Storage.CreateSnapshot(ctx, &godo.SnapshotCreateRequest{
+		VolumeID:    req.GetSourceVolumeId(),
+		Name:        req.GetName(),
 		Description: createdByDO,
 	})
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	return nil, status.Error(codes.Unimplemented, "")
+	return toCreateSnapshotResponse(ctx, snap)
 }
 
 // DeleteSnapshost will be called by the CO to delete a snapshot.
@@ -713,6 +732,27 @@ func (d *Driver) checkLimit(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// toCreateSnapshotResponse converts a DO Snapshot struct into a csi.CreateSnapshotResponse struct
+func toCreateSnapshotResponse(ctx context.Context, snap *godo.Snapshot) (*csi.CreateSnapshotResponse, error) {
+	// snapshot already exists, return the information we have
+	createdAt, err := time.Parse(time.RFC3339, snap.Created)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "couldn't parse snapshot created field: %s", err.Error())
+	}
+
+	return &csi.CreateSnapshotResponse{
+		Snapshot: &csi.Snapshot{
+			Id:             snap.ID,
+			SourceVolumeId: snap.ResourceID,
+			SizeBytes:      int64(snap.SizeGigaBytes) * GB,
+			CreatedAt:      createdAt.UTC().UnixNano(),
+			Status: &csi.SnapshotStatus{
+				Type: csi.SnapshotStatus_READY,
+			},
+		},
+	}, nil
 }
 
 // validateCapabilities validates the requested capabilities. It returns false
