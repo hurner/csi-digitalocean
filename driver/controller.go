@@ -579,6 +579,17 @@ func (d *Driver) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequ
 		"req":    req,
 		"method": "create_snapshot",
 	}).Warn("create snapshot is not implemented")
+
+	// get volume first, if it's created do no thing
+	_, _, err := d.doClient.Storage.CreateSnapshot(ctx, &godo.SnapshotCreateRequest{
+		VolumeID:    "",
+		Name:        "",
+		Description: createdByDO,
+	})
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
 	return nil, status.Error(codes.Unimplemented, "")
 }
 
