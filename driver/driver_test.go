@@ -38,6 +38,15 @@ func init() {
 	rand.Seed(time.Now().UnixNano())
 }
 
+type snapshotRoot struct {
+	Snapshot *godo.Snapshot `json:"snapshot"`
+}
+
+type snapshotsRoot struct {
+	Snapshots []godo.Snapshot `json:"snapshots"`
+	Links     *godo.Links     `json:"links,omitempty"`
+}
+
 type storageVolumeRoot struct {
 	Volume *godo.Volume `json:"volume"`
 	Links  *godo.Links  `json:"links,omitempty"`
@@ -63,8 +72,9 @@ func TestDriverSuite(t *testing.T) {
 	// fake DO Server, not working yet ...
 	nodeId := "987654"
 	fake := &fakeAPI{
-		t:       t,
-		volumes: map[string]*godo.Volume{},
+		t:         t,
+		volumes:   map[string]*godo.Volume{},
+		snapshots: map[string]*godo.Snapshot{},
 		droplets: map[string]*godo.Droplet{
 			nodeId: &godo.Droplet{},
 		},
@@ -112,9 +122,10 @@ func TestDriverSuite(t *testing.T) {
 
 // fakeAPI implements a fake, cached DO API
 type fakeAPI struct {
-	t        *testing.T
-	volumes  map[string]*godo.Volume
-	droplets map[string]*godo.Droplet
+	t         *testing.T
+	volumes   map[string]*godo.Volume
+	snapshots map[string]*godo.Snapshot
+	droplets  map[string]*godo.Droplet
 }
 
 func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -145,6 +156,95 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		_ = json.NewEncoder(w).Encode(&resp)
 		return
+	}
+
+	// snapshots
+	if strings.HasPrefix(r.URL.Path, "/v2/snapshots") {
+		switch r.Method {
+		case "GET":
+			// A list call
+			if strings.HasPrefix(r.URL.String(), "/v2/snapshots?") {
+				snapshots := []godo.Snapshot{}
+				if name := r.URL.Query().Get("name"); name != "" {
+					for _, snap := range f.snapshots {
+						if snap.Name == name {
+							snapshots = append(snapshots, *snap)
+						}
+					}
+				} else {
+					for _, snap := range f.snapshots {
+						snapshots = append(snapshots, *snap)
+					}
+				}
+
+				resp := new(snapshotsRoot)
+				resp.Snapshots = snapshots
+
+				err := json.NewEncoder(w).Encode(&resp)
+				if err != nil {
+					f.t.Fatal(err)
+				}
+				return
+
+			} else {
+				resp := new(snapshotRoot)
+				// single volume get
+				id := filepath.Base(r.URL.Path)
+				snap, ok := f.snapshots[id]
+				if !ok {
+					w.WriteHeader(http.StatusNotFound)
+				} else {
+					resp.Snapshot = snap
+				}
+
+				_ = json.NewEncoder(w).Encode(&resp)
+				return
+			}
+
+			// response with zero items
+			var resp = struct {
+				Volume []*godo.Volume
+				Links  *godo.Links
+			}{}
+
+			err := json.NewEncoder(w).Encode(&resp)
+			if err != nil {
+				f.t.Fatal(err)
+			}
+		case "POST":
+			s := new(godo.SnapshotCreateRequest)
+			err := json.NewDecoder(r.Body).Decode(s)
+			if err != nil {
+				f.t.Fatal(err)
+			}
+
+			vol := f.volumes[s.VolumeID]
+
+			id := randString(10)
+			snap := &godo.Snapshot{
+				ID:            id,
+				Name:          s.Name,
+				ResourceID:    s.VolumeID,
+				SizeGigaBytes: float64(vol.SizeGigaBytes),
+				Created:       time.Now().UTC().Format(time.RFC3339),
+			}
+
+			f.snapshots[id] = snap
+
+			var resp = struct {
+				Snapshot *godo.Snapshot
+				Links    *godo.Links
+			}{
+				Snapshot: snap,
+			}
+			err = json.NewEncoder(w).Encode(&resp)
+			if err != nil {
+				f.t.Fatal(err)
+			}
+		case "DELETE":
+			id := filepath.Base(r.URL.Path)
+			delete(f.snapshots, id)
+		}
 	}
 
 	// rest is /v2/volumes related
